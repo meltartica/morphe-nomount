@@ -1,4 +1,15 @@
 #!/system/bin/sh
+#
+# service.sh - re-inject each Morphe module's patched APK through NoMount.
+#
+# Runs at late_start, after boot_completed, before the launcher is up. That
+# ordering matters: the rule must not appear AFTER the app has resolved its APK
+# and had resource state built for it, or Resources construction returns null and
+# the app dies in ActivityThread.handleBindApplication with
+#   NullPointerException: Resources.getConfiguration() on a null object reference
+#
+# NoMount rules are RUNTIME ONLY and GLOBAL. There is no per-uid rule form, and
+# `nm uid add <uid>` is the opposite operation (it EXCLUDES that uid from VFS).
 
 until [ "$(getprop sys.boot_completed)" = 1 ]; do sleep 1; done
 until [ -d "/sdcard/Android" ]; do sleep 1; done
@@ -7,43 +18,67 @@ sleep 5
 MODDIR=${0%/*}
 . "$MODDIR/util.sh"
 
-if ! command -v nm >/dev/null 2>&1; then
-    alias nm='/data/adb/modules/nomount/bin/nm'
+# Resolve the binary once, in the parent shell. Upstream relied on
+# `alias nm=...`, which does not survive into the `collect_morphe | while`
+# subshell below - so the first app would inject and the rest would silently not.
+NM_BIN="$(command -v nm 2>/dev/null)"
+if [ -z "$NM_BIN" ] || [ ! -x "$NM_BIN" ]; then
+    NM_BIN=/data/adb/modules/nomount/bin/nm
 fi
 
-collect_rvmm | while IFS= read -r rvmm_path; do
-    . "$rvmm_path/config"
-    if [ -z "$PKG_NAME" ]; then continue; fi
+if [ ! -x "$NM_BIN" ]; then
+    exit 0
+fi
 
-    BASEPATH=$(pm path "$PKG_NAME" 2>&1 </dev/null)
-    if [ $? != 0 ] || [ -z "$BASEPATH" ]; then
-        set_rvmm_desc "$rvmm_path" "Needs reflash: app not installed"
+collect_morphe | while IFS= read -r MORPHE_PATH; do
+    PKG="$(morphe_pkg "$MORPHE_PATH")"
+    if [ -z "$PKG" ]; then
+        set_morphe_desc "$MORPHE_PATH" "Needs reflash: cannot determine package name"
         continue
     fi
 
-    BASEPATH=${BASEPATH##*:}
-    BASEDIR=${BASEPATH%/*}
+    RVPATH="$(morphe_apk "$MORPHE_PATH")"
+    if [ -z "$RVPATH" ] || [ ! -f "$RVPATH" ]; then
+        set_morphe_desc "$MORPHE_PATH" "Needs reflash: patched APK missing"
+        continue
+    fi
+
+    BASEPATH="$(pm path "$PKG" 2>&1 </dev/null)"
+    if [ $? != 0 ] || [ -z "$BASEPATH" ]; then
+        set_morphe_desc "$MORPHE_PATH" "Needs reflash: app not installed"
+        continue
+    fi
+
+    BASEPATH="${BASEPATH##*:}"
+    BASEDIR="${BASEPATH%/*}"
 
     if [ ! -d "$BASEDIR/lib" ]; then
-        set_rvmm_desc "$rvmm_path" "Injection failed: corrupted base app"
+        set_morphe_desc "$MORPHE_PATH" "Injection failed: corrupted base app"
         continue
     fi
 
-    VERSION=$(dumpsys package "$PKG_NAME" 2>&1 | grep -m1 versionName)
-    VERSION="${VERSION#*=}"
-    if [ "$VERSION" != "$PKG_VER" ] && [ -n "$VERSION" ]; then
-        set_rvmm_desc "$rvmm_path" "Needs reflash: version mismatch (installed:${VERSION}, module:$PKG_VER)"
+    # The stock app and the patched APK must be the same release, or the app
+    # crashes on launch. The module records what its APK was built for in
+    # `version=`; Morphe's own service.sh refuses to mount on the same mismatch.
+    WANT="$(morphe_ver "$MORPHE_PATH")"
+    HAVE="$(dumpsys package "$PKG" 2>&1 | grep -m1 versionName)"
+    HAVE="${HAVE#*=}"
+    if [ -n "$WANT" ] && [ -n "$HAVE" ] && [ "$HAVE" != "$WANT" ]; then
+        set_morphe_desc "$MORPHE_PATH" "Needs reflash: version mismatch (installed:${HAVE}, module:${WANT})"
         continue
     fi
 
-    RVPATH="/data/adb/rvhc/${rvmm_path##*/}.apk"
-    if ! chcon u:object_r:apk_data_file:s0 "$RVPATH"; then
-        set_rvmm_desc "$rvmm_path" "Needs reflash: apk not found"
+    if ! chcon u:object_r:apk_data_file:s0 "$RVPATH" 2>/dev/null; then
+        set_morphe_desc "$MORPHE_PATH" "Needs reflash: cannot label $RVPATH"
         continue
     fi
 
-    am force-stop "$PKG_NAME"
-    nm add "$BASEPATH" "$RVPATH"
-    set_rvmm_desc "$rvmm_path" "Keep disabled. Injected natively via NoMount."
+    unmount_target "$BASEPATH"
+    am force-stop "$PKG"
 
+    if "$NM_BIN" rule add "$BASEPATH" "$RVPATH"; then
+        set_morphe_desc "$MORPHE_PATH" "Keep disabled. Injected natively via NoMount."
+    else
+        set_morphe_desc "$MORPHE_PATH" "Injection failed: $NM_BIN rule add rejected"
+    fi
 done

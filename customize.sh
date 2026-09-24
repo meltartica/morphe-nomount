@@ -2,7 +2,7 @@
 
 # Setup variables
 NM_BIN="/data/adb/modules/nomount/bin/nm"
-RVMM_NOMOUNT_DIR="/data/adb/modules/rvmm-nomount"
+MORPHE_NOMOUNT_DIR="/data/adb/modules/morphe-nomount"
 
 ui_print "- Checking NoMount dependencies..."
 
@@ -13,8 +13,9 @@ if [ ! -f "$NM_BIN" ]; then
     abort ""
 fi
 
-# Test if the NoMount kernel module is loaded and responding
-if ! "$NM_BIN" v >/dev/null 2>&1; then
+# Test if the NoMount kernel module is loaded and responding.
+# `nm version` is the documented liveness test; its exit code is the answer.
+if ! "$NM_BIN" version >/dev/null 2>&1; then
     ui_print "! Error: NoMount binary execution failed."
     ui_print "! Is the kernel module properly compiled and loaded?"
     abort ""
@@ -25,10 +26,10 @@ ui_print "- NoMount is installed and active."
 # Load utility functions
 . "$MODPATH/util.sh"
 
-# Abort if no ReVanced modules are found on the system
-if [ -z "$(collect_rvmm)" ]; then
-    ui_print "! No revanced-magisk-module is installed."
-    ui_print "  Go install the modules you want first,"
+# Abort if no Morphe root-mount module is found on the system
+if [ -z "$(collect_morphe)" ]; then
+    ui_print "! No Morphe module found."
+    ui_print "  Patch an app in Morphe's root mount mode first,"
     ui_print "  then flash this module."
     abort ""
 fi
@@ -40,9 +41,9 @@ chmod +x "$MODPATH/post-fs-data.sh"
 # Create a convenient shortcut for Termux users to manually re-trigger injections
 REAPPLY=/data/data/com.termux/files/usr/bin/
 if [ -d "$REAPPLY" ]; then
-    echo "su -c 'MODDIR=$MODPATH $RVMM_NOMOUNT_DIR/service.sh'; echo Done.;" >"$REAPPLY/rvmm-nomount"
-    chmod 777 "$REAPPLY/rvmm-nomount"
+    echo "su -c 'MODDIR=$MODPATH $MORPHE_NOMOUNT_DIR/service.sh'; echo Done.;" >"$REAPPLY/morphe-nomount"
+    chmod 777 "$REAPPLY/morphe-nomount"
 fi
 
 ui_print "- Done"
-ui_print "  by maxsteeel (github.com/maxsteeel)"
+ui_print "  forked from rvmm-nomount by maxsteeel (github.com/maxsteeel)"
