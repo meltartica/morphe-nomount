@@ -1,4 +1,4 @@
-# morphe-nomount
+# Morphe NoMount
 
 Inject the Morphe root-mount modules using [NoMount](https://github.com/maxsteeel/nomount),
 eliminating traditional mounts.
