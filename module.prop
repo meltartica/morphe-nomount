@@ -2,5 +2,6 @@ id=morphe-nomount
 name=morphe-nomount
 version=v1.0.0
 versionCode=1
-author=meltartica
+author=meltartica, maxsteeel, j-hc
 description=Inject the Morphe root-mount modules using NoMount, eliminating traditional mounts.
+updateJson=https://github.com/meltartica/morphe-nomount/raw/master/update.json

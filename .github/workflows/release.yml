@@ -1,0 +1,162 @@
+name: release
+
+# `check` runs on every push and PR. `release` runs only for a v* tag, so the
+# manager's update button always points at a published asset.
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # The ZIP asset name must never change: the update button resolves
+  # releases/latest/download/<asset>, which is only permanent while the name is
+  # constant. It is asserted below rather than trusted.
+  ASSET: morphe-nomount.zip
+
+jobs:
+  check:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell syntax
+        run: |
+          set -e
+          for f in *.sh META-INF/com/google/android/update-binary; do
+            sh -n "$f"
+            echo "  ok  $f"
+          done
+
+      - name: No CR in shipped files
+        run: |
+          set -e
+          # A CR anywhere in a shebang or a command silently breaks on Android.
+          if grep -rlP '\r' module.prop customize.sh util.sh post-fs-data.sh service.sh META-INF; then
+            echo "::error::CRLF found in the files above - Android shells cannot run them"
+            exit 1
+          fi
+          echo "no CR in shipped files"
+
+      - name: Module metadata
+        run: |
+          python3 - <<'PY'
+          import json, re, sys
+
+          prop = {}
+          for line in open('module.prop', encoding='utf-8'):
+              line = line.strip()
+              if line and not line.startswith('#') and '=' in line:
+                  k, v = line.split('=', 1)
+                  prop[k.strip()] = v.strip()
+
+          for key in ('id', 'name', 'version', 'versionCode', 'author',
+                      'description', 'updateJson'):
+              if not prop.get(key):
+                  sys.exit(f'::error::module.prop has no "{key}"')
+
+          # KernelSU rejects the install outright if the id does not match.
+          if not re.fullmatch(r'[a-zA-Z][a-zA-Z0-9._-]+', prop['id']):
+              sys.exit(f"::error::id must match [a-zA-Z][a-zA-Z0-9._-]+: {prop['id']}")
+          if not prop['versionCode'].isdigit():
+              sys.exit(f"::error::versionCode must be an integer: {prop['versionCode']}")
+          if '\n' in prop['description']:
+              sys.exit('::error::description must be a single line')
+
+          meta = json.load(open('update.json', encoding='utf-8'))
+          for key in ('version', 'versionCode', 'zipUrl', 'changelog'):
+              if not meta.get(key):
+                  sys.exit(f'::error::update.json has no "{key}"')
+
+          if meta['version'] != prop['version']:
+              sys.exit(f"::error::version mismatch: module.prop={prop['version']} "
+                       f"update.json={meta['version']}")
+          if int(meta['versionCode']) != int(prop['versionCode']):
+              sys.exit(f"::error::versionCode mismatch: module.prop={prop['versionCode']} "
+                       f"update.json={meta['versionCode']}")
+
+          # releases/latest/download/<asset> is only permanent while the asset
+          # name is constant, so pin it.
+          if not re.search(r'/releases/latest/download/[^/]+$', meta['zipUrl']):
+              sys.exit(f"::error::zipUrl must end in releases/latest/download/<constant>: "
+                       f"{meta['zipUrl']}")
+          if not meta['zipUrl'].endswith('/' + __import__('os').environ['ASSET']):
+              sys.exit(f"::error::zipUrl asset must be {__import__('os').environ['ASSET']}: "
+                       f"{meta['zipUrl']}")
+
+          print('module.prop and update.json agree')
+          PY
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches module.prop
+        run: |
+          set -e
+          v=$(sed -n 's/^version=//p' module.prop | tr -d ' \r')
+          if [ "$v" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match module.prop version ${v}"
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches module.prop"
+
+      - name: Build module ZIP
+        run: |
+          set -e
+          rm -rf dist && mkdir -p dist
+          # git stores these as 100644 (core.filemode cannot see the bit on
+          # Windows), but Magisk execs update-binary and the managers exec the
+          # boot scripts. Set the bits here rather than trust the checkout.
+          chmod +x customize.sh util.sh post-fs-data.sh service.sh \
+                   META-INF/com/google/android/update-binary
+          # Explicit file list. Everything at the ZIP root, which is what the
+          # installer expects; repo scaffolding stays out.
+          zip -r -X "dist/${ASSET}" \
+            module.prop customize.sh util.sh post-fs-data.sh service.sh \
+            LICENSE META-INF
+          unzip -l "dist/${ASSET}"
+
+      - name: Verify the ZIP
+        run: |
+          set -e
+          unzip -Z1 "dist/${ASSET}" > /tmp/entries
+          # module.prop must be at the ZIP root or the manager ignores the module
+          grep -qx 'module.prop' /tmp/entries
+          for f in customize.sh util.sh post-fs-data.sh service.sh; do
+            grep -qx "$f" /tmp/entries
+          done
+          grep -qx 'META-INF/com/google/android/update-binary' /tmp/entries
+          # no repo scaffolding may leak in
+          if grep -qE '^(README\.md|CHANGELOG\.md|update\.json|\.gitignore|\.gitattributes|\.github/|dist/)' /tmp/entries; then
+            echo "::error::repo scaffolding leaked into the module ZIP"
+            grep -E '^(README\.md|CHANGELOG\.md|update\.json|\.gitignore|\.gitattributes|\.github/|dist/)' /tmp/entries
+            exit 1
+          fi
+          # and the scripts inside it must be LF
+          rm -rf /tmp/z && mkdir -p /tmp/z && unzip -q "dist/${ASSET}" -d /tmp/z
+          if grep -rlP '\r' /tmp/z; then
+            echo "::error::CRLF inside the packaged ZIP"
+            exit 1
+          fi
+          echo "ZIP verified"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "dist/${ASSET}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "dist/${ASSET}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi

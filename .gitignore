@@ -1,0 +1,8 @@
+# Build output
+dist/
+*.zip
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini

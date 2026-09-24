@@ -68,8 +68,9 @@ the single boot after you re-enable the module by hand.
   the disable-then-reinject approach is entirely theirs.
 - [NoMount](https://github.com/maxsteeel/nomount) — the VFS provider that makes
   the whole thing possible.
-- [rvmm-zygisk-mount](https://github.com/j-hc/rvmm-zygisk-mount) — the Zygisk
-  approach to the same problem, credited by upstream.
+- [rvmm-zygisk-mount](https://github.com/j-hc/rvmm-zygisk-mount) by
+  [j-hc](https://github.com/j-hc) — the Zygisk approach to the same problem,
+  credited by upstream. This module's file layout follows it.
 - [Morphe](https://github.com/MorpheApp) — patches the APK and writes the modules
   this injects.
 
