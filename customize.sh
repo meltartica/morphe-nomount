@@ -38,11 +38,14 @@ fi
 chmod +x "$MODPATH/service.sh"
 chmod +x "$MODPATH/post-fs-data.sh"
 
-# Create a convenient shortcut for Termux users to manually re-trigger injections
+# Create a convenient shortcut for Termux users to manually re-trigger injections.
+# 0755, not the 0777 upstream ships: a world-writable executable in Termux's bin
+# is a needless signature, and Termux only needs to read and execute it. The
+# exec bit is the point - `chown` cannot substitute for it.
 REAPPLY=/data/data/com.termux/files/usr/bin/
 if [ -d "$REAPPLY" ]; then
     echo "su -c 'MODDIR=$MODPATH $MORPHE_NOMOUNT_DIR/service.sh'; echo Done.;" >"$REAPPLY/morphe-nomount"
-    chmod 777 "$REAPPLY/morphe-nomount"
+    chmod 0755 "$REAPPLY/morphe-nomount"
 fi
 
 ui_print "- Done"
