@@ -221,5 +221,11 @@ jobs:
               --notes-file RELEASE_NOTES.md \
               --latest
           fi
-          gh release view "$TAG" --json tagName,isLatest,assets \
-            --template '{{.tagName}}  latest={{.isLatest}}  assets={{range .assets}}{{.name}} {{end}}{{"\n"}}'
+          echo "--- published ---"
+          # Informational only. The publish above already succeeded, and its own
+          # exit code is the gate: a read-back that fails must never turn a
+          # published release into a red build. Plain `gh release view` rather
+          # than --json/--template - an invalid --json field name ("isLatest")
+          # is what turned a successful publish red, and killed the release run.
+          gh release view "$TAG" \
+            || echo "(read-back unavailable; the release was published above)"
