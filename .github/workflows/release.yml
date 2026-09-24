@@ -1,11 +1,11 @@
 name: release
 
-# `check` runs on every push and PR. `release` runs only for a v* tag, so the
-# manager's update button always points at a published asset.
+# A push to master publishes. The tag IS module.prop's version, so bumping the
+# version publishes a new release and any other push updates the current one.
+# `check` gates it, so a broken push never publishes.
 on:
   push:
     branches: [master]
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -15,12 +15,11 @@ permissions:
 env:
   # The ZIP asset name must never change: the update button resolves
   # releases/latest/download/<asset>, which is only permanent while the name is
-  # constant. It is asserted below rather than trusted.
+  # constant. Asserted below rather than trusted.
   ASSET: morphe-nomount.zip
 
 jobs:
   check:
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +45,7 @@ jobs:
       - name: Module metadata
         run: |
           python3 - <<'PY'
-          import json, re, sys
+          import json, os, re, sys
 
           prop = {}
           for line in open('module.prop', encoding='utf-8'):
@@ -85,28 +84,63 @@ jobs:
           if not re.search(r'/releases/latest/download/[^/]+$', meta['zipUrl']):
               sys.exit(f"::error::zipUrl must end in releases/latest/download/<constant>: "
                        f"{meta['zipUrl']}")
-          if not meta['zipUrl'].endswith('/' + __import__('os').environ['ASSET']):
-              sys.exit(f"::error::zipUrl asset must be {__import__('os').environ['ASSET']}: "
+          if not meta['zipUrl'].endswith('/' + os.environ['ASSET']):
+              sys.exit(f"::error::zipUrl asset must be {os.environ['ASSET']}: "
                        f"{meta['zipUrl']}")
 
           print('module.prop and update.json agree')
           PY
 
   release:
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: check
+    # PRs are checked but never published.
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     steps:
+      # Full history, so the version-change check below can diff the push range.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Tag matches module.prop
+      - name: Did module.prop change in this push?
+        id: ver
+        run: |
+          set -e
+          before='${{ github.event.before }}'
+          zero='0000000000000000000000000000000000000000'
+          if [ -z "$before" ] || [ "$before" = "$zero" ]; then
+            # New branch, force push, or a manual run: no usable range, so publish.
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$before" "$GITHUB_SHA" -- module.prop; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve tag from module.prop
+        id: tag
         run: |
           set -e
           v=$(sed -n 's/^version=//p' module.prop | tr -d ' \r')
-          if [ "$v" != "${GITHUB_REF_NAME}" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} does not match module.prop version ${v}"
+          [ -n "$v" ] || { echo "::error::module.prop has no version="; exit 1; }
+          echo "tag=$v" >> "$GITHUB_OUTPUT"
+          echo "release tag is $v"
+
+      - name: Release notes from the newest CHANGELOG section
+        run: |
+          set -e
+          # Everything under the first "## " heading, with the heading itself
+          # stripped - the release title already carries the version.
+          awk '
+            /^## / { if (found) exit; found = 1; next }
+            found  { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "::error::CHANGELOG.md has no '## ' section to use as release notes"
             exit 1
           fi
-          echo "tag ${GITHUB_REF_NAME} matches module.prop"
+          echo "--- notes ---"
+          cat RELEASE_NOTES.md
 
       - name: Build module ZIP
         run: |
@@ -135,9 +169,9 @@ jobs:
           done
           grep -qx 'META-INF/com/google/android/update-binary' /tmp/entries
           # no repo scaffolding may leak in
-          if grep -qE '^(README\.md|CHANGELOG\.md|update\.json|\.gitignore|\.gitattributes|\.github/|dist/)' /tmp/entries; then
+          if grep -qE '^(README\.md|CHANGELOG\.md|RELEASE_NOTES\.md|update\.json|\.gitignore|\.gitattributes|\.github/|dist/)' /tmp/entries; then
             echo "::error::repo scaffolding leaked into the module ZIP"
-            grep -E '^(README\.md|CHANGELOG\.md|update\.json|\.gitignore|\.gitattributes|\.github/|dist/)' /tmp/entries
+            grep -E '^(README\.md|CHANGELOG\.md|RELEASE_NOTES\.md|update\.json|\.gitignore|\.gitattributes|\.github/|dist/)' /tmp/entries
             exit 1
           fi
           # and the scripts inside it must be LF
@@ -149,14 +183,26 @@ jobs:
           echo "ZIP verified"
 
       - name: Publish
+        # Only when this push touched module.prop, i.e. bumped the version. A
+        # docs-only push must not churn the releases page.
+        if: ${{ steps.ver.outputs.changed == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -e
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" "dist/${ASSET}" --clobber
+          # An empty --notes-file silently BLANKS a release's notes, so guard it.
+          [ -s RELEASE_NOTES.md ] || { echo "::error::RELEASE_NOTES.md is empty"; exit 1; }
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists - updating asset and notes"
+            gh release upload "$TAG" "dist/${ASSET}" --clobber
+            gh release edit "$TAG" --notes-file RELEASE_NOTES.md --latest
           else
-            gh release create "${GITHUB_REF_NAME}" "dist/${ASSET}" \
-              --title "${GITHUB_REF_NAME}" \
-              --generate-notes
+            echo "creating release $TAG"
+            gh release create "$TAG" "dist/${ASSET}" \
+              --title "$TAG" \
+              --notes-file RELEASE_NOTES.md \
+              --latest
           fi
+          gh release view "$TAG" --json tagName,isLatest,assets \
+            --template '{{.tagName}}  latest={{.isLatest}}  assets={{range .assets}}{{.name}} {{end}}{{"\n"}}'
